@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>Microphone - WebAudio Examples</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css" integrity="sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
+    <style>
+      canvas {
+        background-color: darkgreen;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="container">
+      <div class="row">
+        <canvas id="canvas-time" width="640" height="330" class="col-6"></canvas>
+        <canvas id="canvas-freq" width="640" height="330" class="col-6"></canvas>
+      </div>
+      <div class="row">
+        <button type="button" id="button-recording" class="col-6 col-lg-2 btn btn-primary">Start Recording</button>
+        <input type="text" id="text-length" readonly value="00:00.00" size="8" class="col-6 col-lg-2 text-right">
+        <button type="button" id="button-download" class="col-6 col-lg-2 btn btn-primary" disabled>Download</button>
+      </div>
+    </section>
+    <script>
+      function lazy(supplier) {
+        let value;
+        let set = false;
+        return () => {
+          if(!set) [value, set] = [supplier(), true];
+          return value;
+        };
+      }
+
+      const audioContext = lazy(() => new AudioContext());
+
+      /**
+       * object microphone:
+       * + blob: Blob (.wav)
+       * + startRecording(): Promise<MediaStreamSourceNode>
+       * + stopRecording(): void
+       */
+      const microphone = new class {
+        constructor() {
+          this.isRecording = false;
+          this.stream = lazy(() => navigator.mediaDevices.getUserMedia({audio: true}).catch(error => console.error(error.toString())));
+          this.blob = null;
+        }
+
+        startRecording() {
+          if(this.isRecording) this.stopRecording();
+          this.isRecording = true;
+          return this.stream().then(stream => {
+            const chunks = [];
+            const recorder = new MediaRecorder(stream, {mimeType: "video/webm;codecs=vp9"});
+            recorder.ondataavailable = e => {
+              chunks.push(e.data);
+              if(recorder.state == "inactive") {
+                this.blob = new Blob(chunks, {type: "audio/wav"});
+              }
+            };
+            recorder.start();
+            this.recorder = recorder;
+            
+            return audioContext().createMediaStreamSource(stream);
+          });
+        }
+
+        stopRecording() {
+          if(this.isRecording) this.recorder.stop();
+          this.isRecording = false;
+          this.recorder = null;
+        }
+      }
+      
+      /**
+       * class Watch(watcher: number -> any):
+       * + start(interval: number): void
+       * + stop(): void
+       */
+      class Watch {
+        constructor(watcher) {
+          this._watcher = watcher;
+        }
+
+        start(interval) {
+          const msStart = Date.now();
+          this.idTimer = setInterval(() => this._watcher(Date.now() - msStart), interval);
+        }
+        
+        stop() {
+          clearInterval(this.idTimer);
+        }
+      }
+
+      const textLength = document.getElementById("text-length");
+
+      function showLength(length) {
+        const min = Math.floor(length / 60e3).toString().padStart(2, "0");
+        const sec = (Math.floor(length / 1e3) % 60).toString().padStart(2, "0");
+        const point2 = (Math.floor(length / 10) % 100).toString().padStart(2, "0");
+        textLength.value = `${min}:${sec}.${point2}`;
+      }
+
+      const canvasTime = document.getElementById("canvas-time");
+      const ccTime = canvasTime.getContext("2d");
+      const canvasFreq = document.getElementById("canvas-freq");
+      const ccFreq = canvasFreq.getContext("2d");
+
+      const analyserNode = lazy(() => audioContext().createAnalyser());
+
+      const dataArrayTime = lazy(() => new Uint8Array(analyserNode().fftSize));
+      const dataArrayFreq = lazy(() => new Uint8Array(analyserNode().frequencyBinCount));
+      const watch = new Watch(length => {
+        showLength(length);
+        
+        analyserNode().getByteTimeDomainData(dataArrayTime());
+        analyserNode().getByteFrequencyData(dataArrayFreq());
+        plot(dataArrayTime(), canvasTime, ccTime, "time", `${(analyserNode().fftSize*1e3/audioContext().sampleRate).toFixed(2)}[ms]`, 10**analyserNode().maxDecibels);
+        plot(dataArrayFreq(), canvasFreq, ccFreq, "frequency", `${(audioContext().sampleRate*1e-3).toFixed(2)}[kHz]`, 10**analyserNode().maxDecibels);
+      });
+
+      const buttonRecording = document.getElementById("button-recording");
+      buttonRecording.onclick = () => {
+        if(microphone.isRecording) {
+          watch.stop();
+          microphone.stopRecording();
+          buttonRecording.textContent = "Start Recording";
+          buttonDownload.disabled = false;
+        } else {
+          microphone.startRecording().then(sourceNode => {
+            sourceNode.connect(analyserNode());
+            watch.start(10);
+          });
+          buttonRecording.textContent = "Stop Recording";
+          buttonDownload.disabled = true;
+        }
+      };
+
+      const buttonDownload = document.getElementById("button-download");
+      buttonDownload.onclick = () => {
+        const a = document.createElement("a");
+        a.download = "recording.wav";
+        a.href = URL.createObjectURL(microphone.blob);
+        a.click();
+      };
+
+      function plot(dataArray, canvas, cc, label, domMax, ampMax) {
+        const {width, height} = canvas;
+        const [w, h] = [width, height-10];
+
+        cc.clearRect(0, 0, width, height);
+
+        cc.strokeStyle = "white";
+        cc.beginPath();
+        cc.moveTo(0, h);
+        cc.lineTo(w, h);
+        cc.lineTo(w-10, h-6);
+        cc.stroke();
+        cc.beginPath();
+        cc.moveTo(0, h);
+        cc.lineTo(0, 0);
+        cc.lineTo(6, 10);
+        cc.stroke();
+        cc.fillStyle = "white";
+        cc.font = "20px monospace";
+        const domTextWidth = 20 * (domMax + "").length;
+        cc.fillText(`max=${domMax}`, w-domTextWidth*0.5-40, h-30, domTextWidth);
+        const ampLabelWidth = 20 * label.length;
+        cc.fillText(label, w-ampLabelWidth*0.5, h-10, ampLabelWidth);
+        cc.fillText(`amplitude max=${ampMax}`, 10, 20, 200);
+
+        const max = 128;
+        const [uX, uY] = [w / dataArray.length, height * 0.5 / max];
+
+        cc.strokeStyle = "lime";
+        cc.beginPath();
+        cc.moveTo(dataArray[0] * uX, h - dataArray[1] * uY);
+        dataArray.forEach((value, i) => cc.lineTo(i * uX, h - value * uY));
+        cc.stroke();
+      }
+    </script>
+    <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js" integrity="sha384-q8i/X+965DzO0rT7abK41JStQIAqVgRVzpbzo5smXKp4YfRvH+8abtTE1Pi6jizo" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js" integrity="sha384-UO2eT0CpHqdSJQ6hJty5KVphtPhzWj9WO1clHTMGa3JDZwrnQq4sF86dIHNDz0W1" crossorigin="anonymous"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js" integrity="sha384-JjSmVgyd0p3pXB1rRibZUAYoIIy6OrQ6VrjIEaFf/nJGzIxFDsf4x0xIM+B07jRM" crossorigin="anonymous"></script>
+  </body>
+</html>
